@@ -37,8 +37,8 @@
 
 #include <cuda_runtime.h>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
 
 using namespace std::string_literals;
 
@@ -141,8 +141,8 @@ struct CUDA_Resource {
 };
 
 struct BM3DData {
-    VSNodeRef * node;
-    VSNodeRef * ref_node;
+    VSNode * node;
+    VSNode * ref_node;
     const VSVideoInfo * vi;
 
     // stored in graphexec:
@@ -188,28 +188,12 @@ static inline void Aggregation(
     }
 }
 
-static void VS_CC BM3DInit(
-    VSMap *in, VSMap *out, void **instanceData, VSNode *node,
-    VSCore *core, const VSAPI *vsapi
-) noexcept {
-
-    BM3DData * d = static_cast<BM3DData *>(*instanceData);
-
-    if (d->radius) {
-        VSVideoInfo vi = *d->vi;
-        vi.height *= 2 * (2 * d->radius + 1);
-        vsapi->setVideoInfo(&vi, 1, node);
-    } else {
-        vsapi->setVideoInfo(d->vi, 1, node);
-    }
-}
-
-static const VSFrameRef *VS_CC BM3DGetFrame(
-    int n, int activationReason, void **instanceData, void **frameData,
+static const VSFrame *VS_CC BM3DGetFrame(
+    int n, int activationReason, void *instanceData, void **frameData,
     VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi
 ) noexcept {
 
-    auto d = static_cast<BM3DData *>(*instanceData);
+    auto d = static_cast<BM3DData *>(instanceData);
 
     if (activationReason == arInitial) {
         int start_frame = std::max(n - d->radius, 0);
@@ -239,7 +223,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
 
         using freeFrame_t = decltype(vsapi->freeFrame);
         const std::vector srcs = [&](){
-            std::vector<std::unique_ptr<const VSFrameRef, const freeFrame_t &>> temp;
+            std::vector<std::unique_ptr<const VSFrame, const freeFrame_t &>> temp;
 
             temp.reserve(num_input_frames);
 
@@ -264,17 +248,17 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
             return temp;
         }();
 
-        const VSFrameRef * src = srcs[radius + (final_ ? temporal_width : 0)].get();
+        const VSFrame * src = srcs[radius + (final_ ? temporal_width : 0)].get();
 
-        std::unique_ptr<VSFrameRef, const freeFrame_t &> dst { nullptr, vsapi->freeFrame };
+        std::unique_ptr<VSFrame, const freeFrame_t &> dst { nullptr, vsapi->freeFrame };
         if (radius) {
             dst.reset(
                 vsapi->newVideoFrame(
-                    d->vi->format, d->vi->width,
+                    &d->vi->format, d->vi->width,
                     d->vi->height * 2 * temporal_width,
                     src, core)
             );
-            for (int i = 0; i < d->vi->format->numPlanes; ++i) {
+            for (int i = 0; i < d->vi->format.numPlanes; ++i) {
                 if (d->zero_init && !d->process[i]) {
                     auto ptr = vsapi->getWritePtr(dst.get(), i);
                     auto height = vsapi->getFrameHeight(dst.get(), i);
@@ -283,7 +267,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
                 }
             }
         } else {
-            const VSFrameRef * fr[] = {
+            const VSFrame * fr[] = {
                 d->process[0] ? nullptr : src,
                 d->process[1] ? nullptr : src,
                 d->process[2] ? nullptr : src
@@ -292,7 +276,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
 
             dst.reset(
                 vsapi->newVideoFrame2(
-                    d->vi->format, d->vi->width,
+                    &d->vi->format, d->vi->width,
                     d->vi->height, fr, pl, src, core)
             );
         }
@@ -335,7 +319,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
                         if (i == 0 || d->process[i]) {
                             auto current_src = srcs[j + outer * temporal_width].get();
 
-                            vs_bitblt(
+                            vsh::bitblt(
                                 h_src, d_pitch,
                                 vsapi->getReadPtr(current_src, i), s_pitch,
                                 width_bytes, height
@@ -361,7 +345,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
                     vsapi->getWritePtr(dst.get(), plane));
 
                 if (radius) {
-                    vs_bitblt(
+                    vsh::bitblt(
                         dstp, s_pitch, h_dst, d_pitch,
                         width_bytes, height * 2 * temporal_width
                     );
@@ -376,7 +360,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
                 h_dst += d_stride * height * 2 * temporal_width;
             }
         } else { // !d->chroma
-            for (int plane = 0; plane < d->vi->format->numPlanes; plane++) {
+            for (int plane = 0; plane < d->vi->format.numPlanes; plane++) {
                 if (!d->process[plane]) {
                     continue;
                 }
@@ -391,7 +375,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
 
                 float * h_src = h_res;
                 for (int i = 0; i < num_input_frames; ++i) {
-                    vs_bitblt(
+                    vsh::bitblt(
                         h_src, d_pitch,
                         vsapi->getReadPtr(srcs[i].get(), plane), s_pitch,
                         width_bytes, height
@@ -407,7 +391,7 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
                     vsapi->getWritePtr(dst.get(), plane));
 
                 if (radius) {
-                    vs_bitblt(
+                    vsh::bitblt(
                         dstp, s_pitch, h_res, d_pitch,
                         width_bytes, height * 2 * temporal_width
                     );
@@ -427,12 +411,12 @@ static const VSFrameRef *VS_CC BM3DGetFrame(
         d->semaphore.release();
 
         if (radius) {
-            VSMap * dst_prop { vsapi->getFramePropsRW(dst.get()) };
+            VSMap * dst_prop { vsapi->getFramePropertiesRW(dst.get()) };
 
-            vsapi->propSetInt(dst_prop, "BM3D_V_radius", d->radius, paReplace);
+            vsapi->mapSetInt(dst_prop, "BM3D_V_radius", d->radius, maReplace);
 
             int64_t process[3] { d->process[0], d->process[1], d->process[2] };
-            vsapi->propSetIntArray(dst_prop, "BM3D_V_process", process, 3);
+            vsapi->mapSetIntArray(dst_prop, "BM3D_V_process", process, 3);
         }
 
         return dst.release();
@@ -463,33 +447,33 @@ static void VS_CC BM3DCreate(
     auto d { std::make_unique<BM3DData>() };
 
     const auto set_error = [&](const std::string & error_message) {
-        vsapi->setError(out, ("BM3D: " + error_message).c_str());
+        vsapi->mapSetError(out, ("BM3D: " + error_message).c_str());
         vsapi->freeNode(d->node);
         vsapi->freeNode(d->ref_node);
     };
 
-    d->node = vsapi->propGetNode(in, "clip", 0, nullptr);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     d->vi = vsapi->getVideoInfo(d->node);
     const int width = d->vi->width;
     const int height = d->vi->height;
-    const int bits_per_sample = d->vi->format->bitsPerSample;
+    const int bits_per_sample = d->vi->format.bitsPerSample;
 
     if (
-        !isConstantFormat(d->vi) || d->vi->format->sampleType == stInteger ||
-        (d->vi->format->sampleType == stFloat && bits_per_sample != 32)) {
+        !vsh::isConstantVideoFormat(d->vi) || d->vi->format.sampleType == stInteger ||
+        (d->vi->format.sampleType == stFloat && bits_per_sample != 32)) {
         return set_error("only constant format 32bit float input supported");
     }
 
     int error;
 
-    d->ref_node = vsapi->propGetNode(in, "ref", 0, &error);
+    d->ref_node = vsapi->mapGetNode(in, "ref", 0, &error);
     bool final_;
     if (error) {
         d->ref_node = nullptr;
         final_ = false;
     } else {
-        auto ref_vi = vsapi->getVideoInfo(d->ref_node);
-        if (ref_vi->format->id != d->vi->format->id) {
+        const auto * ref_vi = vsapi->getVideoInfo(d->ref_node);
+        if (!vsh::isSameVideoFormat(&ref_vi->format, &d->vi->format)) {
             return set_error("\"ref\" must be of the same format as \"clip\"");
         } else if (ref_vi->width != width || ref_vi->height != height ) {
             return set_error("\"ref\" must be of the same dimensions as \"clip\"");
@@ -504,7 +488,7 @@ static void VS_CC BM3DCreate(
     float sigma[3];
     for (int i = 0; i < std::ssize(sigma); ++i) {
         sigma[i] = static_cast<float>(
-            vsapi->propGetFloat(in, "sigma", i, &error));
+            vsapi->mapGetFloat(in, "sigma", i, &error));
 
         if (error) {
             sigma[i] = (i == 0) ? 3.0f : sigma[i - 1];
@@ -525,8 +509,8 @@ static void VS_CC BM3DCreate(
 
     int block_step[3];
     for (int i = 0; i < std::ssize(block_step); ++i) {
-        block_step[i] = int64ToIntS(
-            vsapi->propGetInt(in, "block_step", i, &error));
+        block_step[i] = vsh::int64ToIntS(
+            vsapi->mapGetInt(in, "block_step", i, &error));
 
         if (error) {
             block_step[i] = (i == 0) ? 8 : block_step[i - 1];
@@ -537,8 +521,8 @@ static void VS_CC BM3DCreate(
 
     int bm_range[3];
     for (int i = 0; i < std::ssize(bm_range); ++i) {
-        bm_range[i] = int64ToIntS(
-            vsapi->propGetInt(in, "bm_range", i, &error));
+        bm_range[i] = vsh::int64ToIntS(
+            vsapi->mapGetInt(in, "bm_range", i, &error));
 
         if (error) {
             bm_range[i] = (i == 0) ? 9 : bm_range[i - 1];
@@ -548,7 +532,7 @@ static void VS_CC BM3DCreate(
     }
 
     const int radius = [&](){
-        int temp = int64ToIntS(vsapi->propGetInt(in, "radius", 0, &error));
+        int temp = vsh::int64ToIntS(vsapi->mapGetInt(in, "radius", 0, &error));
         if (error) {
             return 0;
         }
@@ -561,8 +545,8 @@ static void VS_CC BM3DCreate(
 
     int ps_num[3];
     for (int i = 0; i < std::ssize(ps_num); ++i) {
-        ps_num[i] = int64ToIntS(
-            vsapi->propGetInt(in, "ps_num", i, &error));
+        ps_num[i] = vsh::int64ToIntS(
+            vsapi->mapGetInt(in, "ps_num", i, &error));
 
         if (error) {
             ps_num[i] = (i == 0) ? 2 : ps_num[i - 1];
@@ -573,8 +557,8 @@ static void VS_CC BM3DCreate(
 
     int ps_range[3];
     for (int i = 0; i < std::ssize(ps_range); ++i) {
-        ps_range[i] = int64ToIntS(
-            vsapi->propGetInt(in, "ps_range", i, &error));
+        ps_range[i] = vsh::int64ToIntS(
+            vsapi->mapGetInt(in, "ps_range", i, &error));
 
         if (error) {
             ps_range[i] = (i == 0) ? 4 : ps_range[i - 1];
@@ -584,19 +568,19 @@ static void VS_CC BM3DCreate(
     }
 
     const bool chroma = [&](){
-        bool temp = !!vsapi->propGetInt(in, "chroma", 0, &error);
+        bool temp = !!vsapi->mapGetInt(in, "chroma", 0, &error);
         if (error) {
             return false;
         }
         return temp;
     }();
-    if (chroma && d->vi->format->id != pfYUV444PS) {
+    if (chroma && !vsh::isSameVideoPresetFormat(pfYUV444PS, &d->vi->format, core, vsapi)) {
         return set_error("clip format must be YUV444 when \"chroma\" is true");
     }
     d->chroma = chroma;
 
     const int device_id = [&](){
-        int temp = int64ToIntS(vsapi->propGetInt(in, "device_id", 0, &error));
+        int temp = vsh::int64ToIntS(vsapi->mapGetInt(in, "device_id", 0, &error));
         if (error) {
             return 0;
         }
@@ -612,7 +596,7 @@ static void VS_CC BM3DCreate(
     d->device_id = device_id;
 
     const bool fast = [&](){
-        bool temp = !!vsapi->propGetInt(in, "fast", 0, &error);
+        bool temp = !!vsapi->mapGetInt(in, "fast", 0, &error);
         if (error) {
             return true;
         }
@@ -622,14 +606,14 @@ static void VS_CC BM3DCreate(
     d->num_copy_engines = num_copy_engines;
 
     const float extractor = [&](){
-        int temp = int64ToIntS(vsapi->propGetInt(in, "extractor_exp", 0, &error));
+        int temp = vsh::int64ToIntS(vsapi->mapGetInt(in, "extractor_exp", 0, &error));
         if (error) {
             return 0.0f;
         }
         return (temp ? std::ldexp(1.0f, temp) : 0.0f);
     }();
 
-    d->zero_init = !!vsapi->propGetInt(in, "zero_init", 0, &error);
+    d->zero_init = !!vsapi->mapGetInt(in, "zero_init", 0, &error);
     if (error) {
         d->zero_init = true;
     }
@@ -640,8 +624,8 @@ static void VS_CC BM3DCreate(
 
         d->resources.reserve(num_copy_engines);
 
-        int max_width { d->process[0] ? width : width >> d->vi->format->subSamplingW };
-        int max_height { d->process[0] ? height : height >> d->vi->format->subSamplingH };
+        int max_width { d->process[0] ? width : width >> d->vi->format.subSamplingW };
+        int max_height { d->process[0] ? height : height >> d->vi->format.subSamplingH };
 
         int num_planes { chroma ? 3 : 1 };
         int temporal_width = 2 * radius + 1;
@@ -683,10 +667,10 @@ static void VS_CC BM3DCreate(
                     final_, extractor
                 );
             } else {
-                auto subsamplingW = d->vi->format->subSamplingW;
-                auto subsamplingH = d->vi->format->subSamplingH;
+                auto subsamplingW = d->vi->format.subSamplingW;
+                auto subsamplingH = d->vi->format.subSamplingH;
 
-                for (int plane = 0; plane < d->vi->format->numPlanes; ++plane) {
+                for (int plane = 0; plane < d->vi->format.numPlanes; ++plane) {
                     if (d->process[plane]) {
                         int plane_width { plane == 0 ? width : width >> subsamplingW };
                         int plane_height { plane == 0 ? height : height >> subsamplingH };
@@ -713,17 +697,27 @@ static void VS_CC BM3DCreate(
         }
     }
 
-    vsapi->createFilter(
-        in, out, "BM3D",
-        BM3DInit, BM3DGetFrame, BM3DFree,
-        fmParallel, 0, d.release(), core
-    );
+    VSVideoInfo vi = *d->vi;
+    
+    if (radius)
+        vi.height *= 2 * (2 * d->radius + 1);
+
+    std::vector<VSFilterDependency> deps = {
+        {d->node, rpGeneral},
+    };
+
+    if (d->ref_node)
+        deps.push_back({d->ref_node, rpGeneral});
+
+    vsapi->createVideoFilter(
+        out, "BM3D", &vi, BM3DGetFrame, BM3DFree,
+        fmParallel, deps.data(), deps.size(), d.release(), core);
 }
 
 struct VAggregateData {
-    VSNodeRef * node;
+    VSNode * node;
 
-    VSNodeRef * src_node;
+    VSNode * src_node;
     const VSVideoInfo * src_vi;
 
     std::array<bool, 3> process; // sigma != 0
@@ -734,22 +728,12 @@ struct VAggregateData {
     std::shared_mutex buffer_lock;
 };
 
-static void VS_CC VAggregateInit(
-    VSMap *in, VSMap *out, void **instanceData, VSNode *node,
-    VSCore *core, const VSAPI *vsapi
-) {
-
-    VAggregateData * d = static_cast<VAggregateData *>(*instanceData);
-
-    vsapi->setVideoInfo(d->src_vi, 1, node);
-}
-
-static const VSFrameRef *VS_CC VAggregateGetFrame(
-    int n, int activationReason, void **instanceData, void **frameData,
+static const VSFrame *VS_CC VAggregateGetFrame(
+    int n, int activationReason, void *instanceData, void **frameData,
     VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi
 ) {
 
-    auto * d = static_cast<VAggregateData *>(*instanceData);
+    auto * d = static_cast<VAggregateData *>(instanceData);
 
     if (activationReason == arInitial) {
         int start_frame = std::max(n - d->radius, 0);
@@ -760,9 +744,9 @@ static const VSFrameRef *VS_CC VAggregateGetFrame(
         }
         vsapi->requestFrameFilter(n, d->src_node, frameCtx);
     } else if (activationReason == arAllFramesReady) {
-        const VSFrameRef * src_frame = vsapi->getFrameFilter(n, d->src_node, frameCtx);
+        const VSFrame * src_frame = vsapi->getFrameFilter(n, d->src_node, frameCtx);
 
-        std::vector<const VSFrameRef *> vbm3d_frames;
+        std::vector<const VSFrame *> vbm3d_frames;
         vbm3d_frames.reserve(2 * d->radius + 1);
         for (int i = n - d->radius; i <= n + d->radius; ++i) {
             auto frame_id = std::clamp(i, 0, d->src_vi->numFrames - 1);
@@ -786,7 +770,7 @@ static const VSFrameRef *VS_CC VAggregateGetFrame(
             d->buffer_lock.unlock_shared();
 
             if (!init) {
-                assert(d->process[0] || d->src_vi->format->numPlanes > 1);
+                assert(d->process[0] || d->src_vi->format.numPlanes > 1);
 
                 const int max_width {
                     d->process[0] ?
@@ -801,18 +785,18 @@ static const VSFrameRef *VS_CC VAggregateGetFrame(
             }
         }
 
-        const VSFrameRef * fr[] {
+        const VSFrame * fr[] {
             d->process[0] ? nullptr : src_frame,
             d->process[1] ? nullptr : src_frame,
             d->process[2] ? nullptr : src_frame
         };
         constexpr int pl[] { 0, 1, 2 };
         auto dst_frame = vsapi->newVideoFrame2(
-            d->src_vi->format,
+            &d->src_vi->format,
             d->src_vi->width, d->src_vi->height,
             fr, pl, src_frame, core);
 
-        for (int plane = 0; plane < d->src_vi->format->numPlanes; ++plane) {
+        for (int plane = 0; plane < d->src_vi->format.numPlanes; ++plane) {
             if (d->process[plane]) {
                 int plane_width = vsapi->getFrameWidth(src_frame, plane);
                 int plane_height = vsapi->getFrameHeight(src_frame, plane);
@@ -885,28 +869,32 @@ static void VS_CC VAggregateCreate(
 
     auto d { std::make_unique<VAggregateData>() };
 
-    d->node = vsapi->propGetNode(in, "clip", 0, nullptr);
+    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
     auto vi = vsapi->getVideoInfo(d->node);
-    d->src_node = vsapi->propGetNode(in, "src", 0, nullptr);
+    d->src_node = vsapi->mapGetNode(in, "src", 0, nullptr);
     d->src_vi = vsapi->getVideoInfo(d->src_node);
 
     d->radius = (vi->height / d->src_vi->height - 2) / 4;
 
     d->process.fill(false);
-    int num_planes_args = vsapi->propNumElements(in, "planes");
+    int num_planes_args = vsapi->mapNumElements(in, "planes");
     for (int i = 0; i < num_planes_args; ++i) {
-        int plane = vsapi->propGetInt(in, "planes", i, nullptr);
+        int plane = vsapi->mapGetInt(in, "planes", i, nullptr);
         d->process[plane] = true;
     }
 
     VSCoreInfo core_info;
-    vsapi->getCoreInfo2(core, &core_info);
+    vsapi->getCoreInfo(core, &core_info);
     d->buffer.reserve(core_info.numThreads);
 
-    vsapi->createFilter(
-        in, out, "VAggregate",
-        VAggregateInit, VAggregateGetFrame, VAggregateFree,
-        fmParallel, 0, d.release(), core);
+    VSFilterDependency deps[] = {
+        {d->node, rpGeneral},
+        {d->src_node, rpGeneral},
+    };
+
+    vsapi->createVideoFilter(
+        out, "VAggregate", d->src_vi, VAggregateGetFrame, VAggregateFree,
+        fmParallel, deps, 2, d.release(), core);
 }
 
 static void VS_CC BM3Dv2Create(
@@ -917,9 +905,9 @@ static void VS_CC BM3Dv2Create(
     std::array<bool, 3> process;
     process.fill(true);
 
-    int num_sigma_args = vsapi->propNumElements(in, "sigma");
+    int num_sigma_args = vsapi->mapNumElements(in, "sigma");
     for (int i = 0; i < std::min(3, num_sigma_args); ++i) {
-        auto sigma = vsapi->propGetFloat(in, "sigma", i, nullptr);
+        auto sigma = vsapi->mapGetFloat(in, "sigma", i, nullptr);
         if (sigma < std::numeric_limits<float>::epsilon()) {
             process[i] = false;
         }
@@ -931,78 +919,75 @@ static void VS_CC BM3Dv2Create(
     }
 
     bool skip = true;
-    auto src = vsapi->propGetNode(in, "clip", 0, nullptr);
+    auto src = vsapi->mapGetNode(in, "clip", 0, nullptr);
     auto src_vi = vsapi->getVideoInfo(src);
-    for (int i = 0; i < src_vi->format->numPlanes; ++i) {
+    for (int i = 0; i < src_vi->format.numPlanes; ++i) {
         skip &= !process[i];
     }
     if (skip) {
-        vsapi->propSetNode(out, "clip", src, paReplace);
+        vsapi->mapSetNode(out, "clip", src, maReplace);
         vsapi->freeNode(src);
         return ;
     }
 
     auto map = vsapi->invoke(myself, "BM3D", in);
-    if (auto error = vsapi->getError(map); error) {
-        vsapi->setError(out, error);
+    if (auto error = vsapi->mapGetError(map); error) {
+        vsapi->mapSetError(out, error);
         vsapi->freeMap(map);
         vsapi->freeNode(src);
         return ;
     }
 
     int error;
-    int radius = vsapi->propGetInt(in, "radius", 0, &error);
+    int radius = vsapi->mapGetInt(in, "radius", 0, &error);
     if (error) {
         radius = 0;
     }
     if (radius == 0) {
         // spatial BM3D should handle everything itself
-        auto node = vsapi->propGetNode(map, "clip", 0, nullptr);
+        auto node = vsapi->mapGetNode(map, "clip", 0, nullptr);
         vsapi->freeMap(map);
-        vsapi->propSetNode(out, "clip", node, paReplace);
+        vsapi->mapSetNode(out, "clip", node, maReplace);
         vsapi->freeNode(node);
         vsapi->freeNode(src);
         return ;
     }
 
-    vsapi->propSetNode(map, "src", src, paReplace);
+    vsapi->mapSetNode(map, "src", src, maReplace);
     vsapi->freeNode(src);
 
     for (int i = 0; i < 3; ++i) {
         if (process[i]) {
-            vsapi->propSetInt(map, "planes", i, paAppend);
+            vsapi->mapSetInt(map, "planes", i, maAppend);
         }
     }
 
     auto map2 = vsapi->invoke(myself, "VAggregate", map);
     vsapi->freeMap(map);
-    if (auto error = vsapi->getError(map2); error) {
-        vsapi->setError(out, error);
+    if (auto error = vsapi->mapGetError(map2); error) {
+        vsapi->mapSetError(out, error);
         vsapi->freeMap(map2);
         return ;
     }
 
-    auto node = vsapi->propGetNode(map2, "clip", 0, nullptr);
+    auto node = vsapi->mapGetNode(map2, "clip", 0, nullptr);
     vsapi->freeMap(map2);
-    vsapi->propSetNode(out, "clip", node, paReplace);
+    vsapi->mapSetNode(out, "clip", node, maReplace);
     vsapi->freeNode(node);
 }
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(
-    VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin
-) {
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
 
     myself = plugin;
 
-    configFunc(
+    vspapi->configPlugin(
         "com.wolframrhodium.bm3dcuda", "bm3dcuda",
         "BM3D algorithm implemented in CUDA",
-        VAPOURSYNTH_API_VERSION, 1, plugin
-    );
+        VS_MAKE_VERSION(1, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
 
     constexpr auto bm3d_args {
-        "clip:clip;"
-        "ref:clip:opt;"
+        "clip:vnode;"
+        "ref:vnode:opt;"
         "sigma:float[]:opt;"
         "block_step:int[]:opt;"
         "bm_range:int[]:opt;"
@@ -1016,14 +1001,15 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "zero_init:int:opt;"
     };
 
-    registerFunc("BM3D", bm3d_args, BM3DCreate, nullptr, plugin);
+     vspapi->registerFunction("BM3D", bm3d_args, "clip:vnode;", BM3DCreate, nullptr, plugin);
 
-    registerFunc(
+     vspapi->registerFunction(
         "VAggregate",
-        "clip:clip;"
-        "src:clip;"
+        "clip:vnode;"
+        "src:vnode;"
         "planes:int[];",
+        "clip:vnode;",
         VAggregateCreate, nullptr, plugin);
 
-    registerFunc("BM3Dv2", bm3d_args, BM3Dv2Create, nullptr, plugin);
+     vspapi->registerFunction("BM3Dv2", bm3d_args, "clip:vnode;", BM3Dv2Create, nullptr, plugin);
 }
